@@ -46,6 +46,9 @@ def build_dashboard_payload():
 
 
 def notify_dashboard_update():
+    """Se llama cada vez que llega un mensaje MQTT que puede cambiar el
+    dashboard, overview o history: emite el payload actualizado a todos
+    los clientes conectados por Socket.IO."""
     socketio.emit("dashboard_update", build_dashboard_payload())
 
 
@@ -90,7 +93,7 @@ def handle_disconnect():
 
 
 if __name__ == "__main__":
-    iniciar_listener_en_hilo()
+    iniciar_listener_en_hilo(on_data_change=notify_dashboard_update)
     socketio.run(
         app,
         host=config.API_HOST,

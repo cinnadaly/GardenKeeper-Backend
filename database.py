@@ -79,7 +79,7 @@ def insert_sensor_reading(data: dict):
             data.get("temp"),
             data.get("hum_ambient"),
             data.get("soil_moisture"),
-            data.get("water_deposit"),   
+            data.get("water_deposit"),
             data.get("pump_status"),
             _now(),
         ))
@@ -138,15 +138,16 @@ def insert_irrigation_log(data: dict):
         ))
         cursor.close()
 
+
 def get_last_reading():
     with get_conn() as conn:
-        cursor = conn.cursor(dictionary=True) 
+        cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT * FROM sensor_readings ORDER BY reading_id DESC LIMIT 1
         """)
         row = cursor.fetchone()
         cursor.close()
-        return row 
+        return row
 
 
 def get_system_status():
@@ -174,7 +175,7 @@ def get_soil_moisture_per_hour(horas=12):
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT
-                HOUR(timestamp) AS hora_num,         
+                HOUR(timestamp) AS hora_num,
                 AVG(soil_moisture) AS promedio
             FROM sensor_readings
             WHERE timestamp >= NOW() - INTERVAL %s HOUR
@@ -213,13 +214,13 @@ def get_history(limite=20):
             sub_cursor.execute("""
                 SELECT COALESCE(SUM(duration), 0) AS total
                 FROM irrigation_log
-                WHERE DATE_FORMAT(creado_en, '%%Y-%%m-%%d %%H:00') = %s
+                WHERE DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:00') = %s
             """, (r["bucket"],))
             watered_for = sub_cursor.fetchone()["total"]
             sub_cursor.close()
 
             historial.append({
-                "time": r["hora"] or "N/A",
+                "time": r["hour"] or "N/A",
                 "soil_moisture": r["soil_moisture"],
                 "temperature": r["temperature"],
                 "watered_for_min": round(watered_for, 1),
