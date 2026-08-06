@@ -1,10 +1,3 @@
-"""
-Escucha los topicos MQTT publicados por el ESP32 y guarda todo en SQLite.
-
-Corre en un hilo aparte dentro del mismo proceso del server Flask
-(ver app.py), asi que el listener y el API viven juntos por ahora.
-"""
-
 import json
 import ssl
 import paho.mqtt.client as mqtt
@@ -36,7 +29,6 @@ def _on_message(client, userdata, msg):
             db.upsert_system_status(data)
 
         elif topic == config.TOPIC_ESTADO_ESP:
-            # payload simple: "online" / "offline" (viene del LWT)
             db.set_esp32_status(payload_raw)
 
         elif topic == config.TOPIC_RIEGO_LOG:
@@ -59,7 +51,6 @@ def crear_cliente_mqtt():
     )
     client.username_pw_set(config.MQTT_USER, config.MQTT_PASSWORD)
 
-    # Igual que el ESP32: TLS sin verificar certificado (solo para pruebas)
     client.tls_set(cert_reqs=ssl.CERT_NONE)
     client.tls_insecure_set(True)
 
@@ -70,8 +61,7 @@ def crear_cliente_mqtt():
 
 
 def iniciar_listener_en_hilo():
-    """Conecta y arranca el loop de MQTT en un hilo de fondo (no bloqueante)."""
     client = crear_cliente_mqtt()
     client.connect(config.MQTT_HOST, config.MQTT_PORT, keepalive=60)
-    client.loop_start()  # usa un thread interno de paho-mqtt
+    client.loop_start()
     return client

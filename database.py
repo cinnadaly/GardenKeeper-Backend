@@ -1,12 +1,3 @@
-"""
-Capa de acceso a datos (MySQL).
-
-3 tablas, cada una con una razon de ser distinta:
-- sensor_readings : lecturas periodicas de sensores (append-only, cada ~5s)
-- irrigation_log   : un evento = un riego completo (start, end, duration)
-- system_status    : una sola fila, se sobreescribe (estado actual del sistema)
-"""
-
 import mysql.connector
 from contextlib import contextmanager
 from datetime import datetime
@@ -16,7 +7,6 @@ from config import DB_HOST, DB_USER, DB_PASSWORD, DB_NAME
 
 @contextmanager
 def get_conn():
-    # dictionary=True hace que cada fila salga como dict, igual que sqlite3.Row
     conn = mysql.connector.connect(
         host=DB_HOST,
         user=DB_USER,
@@ -76,11 +66,6 @@ def init_db():
 def _now():
     return datetime.now().isoformat(timespec="seconds")
 
-
-# --------------------------------------------------
-# INSERTS (llamados desde el listener MQTT)
-# --------------------------------------------------
-
 def insert_sensor_reading(data: dict):
     with get_conn() as conn:
         cursor = conn.cursor()
@@ -94,7 +79,7 @@ def insert_sensor_reading(data: dict):
             data.get("temp"),
             data.get("hum_ambient"),
             data.get("soil_moisture"),
-            data.get("water_deposit"),   # el ESP32 manda "water_deposit", aqui se guarda como water_level
+            data.get("water_deposit"),   
             data.get("pump_status"),
             _now(),
         ))
@@ -104,7 +89,6 @@ def insert_sensor_reading(data: dict):
 def upsert_system_status(data: dict):
     with get_conn() as conn:
         cursor = conn.cursor()
-        # ON DUPLICATE KEY UPDATE es el equivalente en MySQL de ON CONFLICT DO UPDATE
         cursor.execute("""
             INSERT INTO system_status (id, esp32, mqtt, pump_available, sensors_ok, pump_status, updated_at)
             VALUES (1, %s, %s, %s, %s, %s, %s)
@@ -154,20 +138,15 @@ def insert_irrigation_log(data: dict):
         ))
         cursor.close()
 
-
-# --------------------------------------------------
-# LECTURAS (usadas por el API para el dashboard)
-# --------------------------------------------------
-
 def get_last_reading():
     with get_conn() as conn:
-        cursor = conn.cursor(dictionary=True)  # dictionary=True = filas como dict
+        cursor = conn.cursor(dictionary=True) 
         cursor.execute("""
             SELECT * FROM sensor_readings ORDER BY reading_id DESC LIMIT 1
         """)
         row = cursor.fetchone()
         cursor.close()
-        return row  # ya es un dict o None, no hace falta convertir
+        return row 
 
 
 def get_system_status():
@@ -191,13 +170,11 @@ def get_last_irrigation():
 
 
 def get_soil_moisture_per_hour(horas=12):
-    """Para la grafica 'Soil Moisture Per Hour (%)' del Dashboard."""
     with get_conn() as conn:
         cursor = conn.cursor(dictionary=True)
-        # DATE_FORMAT reemplaza a strftime; NOW() - INTERVAL reemplaza a datetime('now', '-N hours')
         cursor.execute("""
             SELECT
-                DATE_FORMAT(timestamp, '%%H') AS hora_num,
+                HOUR(timestamp) AS hora_num,         
                 AVG(soil_moisture) AS promedio
             FROM sensor_readings
             WHERE timestamp >= NOW() - INTERVAL %s HOUR
@@ -211,10 +188,6 @@ def get_soil_moisture_per_hour(horas=12):
 
 
 def get_history(limite=20):
-    """
-    Para la tabla 'System History': una fila por hora con la ultima
-    lectura de esa hora + minutos regados durante esa hora (de irrigation_log).
-    """
     with get_conn() as conn:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
