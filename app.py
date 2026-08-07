@@ -25,7 +25,7 @@ def _json_safe(value):
 
 
 def build_dashboard_payload():
-    ultima = db.get_last_reading() or {}
+    ultima = db.get_reading() or {}
     estado = db.get_system_status() or {}
     grafica = db.get_soil_moisture_per_hour(horas=12)
 
