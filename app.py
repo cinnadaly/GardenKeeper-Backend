@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO
 
@@ -90,6 +90,36 @@ def handle_connect():
 @socketio.on("disconnect")
 def handle_disconnect():
     pass
+
+
+PROFILE_PRESETS = {
+    "small":  {"name": "Small",  "moisture_threshold": 35, "duration_min": 2, "water_usage": "Low"},
+    "medium": {"name": "Medium", "moisture_threshold": 41, "duration_min": 4, "water_usage": "Medium"},
+    "large":  {"name": "Large",  "moisture_threshold": 55, "duration_min": 6, "water_usage": "High"},
+}
+
+@app.route("/api/plant", methods=["GET"])
+def get_plant():
+    perfil = db.get_plant_profile()
+    if perfil is None:
+        return jsonify({"configured": False})
+    return jsonify({"configured": True, **perfil})
+
+
+@app.route("/api/plant", methods=["POST"])
+def save_plant():
+    if db.get_plant_profile() is not None:
+        return jsonify({"error": "The plant has already been set and cannot be modified"}), 409
+
+    data = request.json or {}
+    size = data.get("size")
+
+    if size not in PROFILE_PRESETS:
+        return jsonify({"error": "Invalid profile size"}), 400
+
+    perfil = PROFILE_PRESETS[size]
+    db.create_plant_profile({"size": size, **perfil})
+    return jsonify({"status": "ok", "size": size, **perfil})
 
 
 if __name__ == "__main__":
