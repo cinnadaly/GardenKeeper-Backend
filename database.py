@@ -229,3 +229,26 @@ def get_history(limite=20):
 
         cursor.close()
         return historial
+
+
+def get_plant_profile():
+    with get_conn() as conn:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM plant_profile WHERE id = 1")
+        row = cursor.fetchone()
+        cursor.close()
+        return row  
+
+def create_plant_profile(data: dict):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO plant_profile
+                (id, size, name, moisture_threshold, duration_min, water_usage, min_interval_hours, updated_at)
+            VALUES (1, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            data["size"], data["name"], data["moisture_threshold"],
+            data["duration_min"], data.get("water_usage"),
+            data.get("min_interval_hours", 2), datetime.now()
+        ))
+        cursor.close()
