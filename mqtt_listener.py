@@ -30,21 +30,28 @@ def _stop_automatic_watering(client):
 
 
 def _evaluate_automatic_watering(data, client):
+    #printMyMessage()
     global _last_watering_ts, _watering_timer, _watering_in_progress
+    soil = data.get("soil_moisture")
+    profile = db.get_plant_profile()
+
+    now = time.time()
+    hours_since_last = (now - _last_watering_ts) / 3600
+
+    print("MESSAGE: soil" + str(soil) + " - moisture threshold " + str(profile["moisture_threshold"]) + " - hours since last " + str(hours_since_last) +  " - min-interval-hours: " + str(profile["min_interval_hours"]))
+
 
     if _watering_in_progress:
         return  # already watering, skip evaluation
 
-    profile = db.get_plant_profile()
     if profile is None:
         return  # plant not configured yet
 
-    soil = data.get("soil_moisture")
+   
     if soil is None:
         return
 
-    now = time.time()
-    hours_since_last = (now - _last_watering_ts) / 3600
+
 
     if soil < profile["moisture_threshold"] and hours_since_last >= profile["min_interval_hours"]:
         print(f"[AUTO-WATER] Soil at {soil}%, threshold {profile['moisture_threshold']}%. Starting watering...")
@@ -81,6 +88,7 @@ def _on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def _on_message(client, userdata, msg):
+    
     on_data_change = userdata
     topic = msg.topic
     payload_raw = msg.payload.decode("utf-8", errors="ignore")
@@ -116,6 +124,8 @@ def _on_message(client, userdata, msg):
     except Exception as e:
         print(f"[MQTT] Error processing message from {topic}: {e}")
 
+def printMyMessage():
+    print("WE ARE ON MESSAGE")
 
 def crear_cliente_mqtt(on_data_change=None):
     client = mqtt.Client(
@@ -128,6 +138,7 @@ def crear_cliente_mqtt(on_data_change=None):
     client.user_data_set(on_data_change)
     client.on_connect = _on_connect
     client.on_message = _on_message
+    #client.on_message = printMyMessage()
     return client
 
 

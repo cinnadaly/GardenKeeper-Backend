@@ -1,7 +1,6 @@
 import mysql.connector
 from contextlib import contextmanager
-from datetime import datetime
-
+from datetime import datetime, timedelta
 from config import DB_HOST, DB_USER, DB_PASSWORD, DB_NAME
 
 
@@ -67,6 +66,7 @@ def _now():
     return datetime.now().isoformat(timespec="seconds")
 
 def insert_sensor_reading(data: dict):
+    print("my timestamp: " + str(data.get("timestamp")))
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -123,16 +123,42 @@ def set_esp32_status(valor: str):
         """, (valor, _now()))
         cursor.close()
 
+        from datetime import datetime, timedelta
+
+#create datetime for logs
+def _parse_time_to_datetime(time_str, reference_date=None):
+    
+    if not time_str or time_str == "N/A":
+        return None
+
+    reference_date = reference_date or datetime.now().date()
+    try:
+        parsed_time = datetime.strptime(time_str, "%I:%M %p").time()
+        return datetime.combine(reference_date, parsed_time)
+    except ValueError:
+        return None
+
+
+
 
 def insert_irrigation_log(data: dict):
     with get_conn() as conn:
         cursor = conn.cursor()
+
+        start_dt = _parse_time_to_datetime(data.get("started"))
+        end_dt = _parse_time_to_datetime(data.get("ended"))
+
+        # Si el riego cruzo la medianoche (ej. empezo 11:58 PM y termino 12:01 AM),
+        # el "ended" cae en el dia siguiente aunque ambos usen la fecha de hoy.
+        if start_dt and end_dt and end_dt < start_dt:
+            end_dt += timedelta(days=1)
+
         cursor.execute("""
             INSERT INTO irrigation_log (start_time, end_time, duration, created_at)
             VALUES (%s, %s, %s, %s)
         """, (
-            data.get("started"),
-            data.get("ended"),
+            start_dt,
+            end_dt,
             data.get("duracion_min"),
             _now(),
         ))

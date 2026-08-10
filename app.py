@@ -25,7 +25,7 @@ def _json_safe(value):
 
 
 def build_dashboard_payload():
-    ultima = db.get_reading() or {}
+    ultima = db.get_last_reading() or {}
     estado = db.get_system_status() or {}
     grafica = db.get_soil_moisture_per_hour(horas=12)
 
@@ -93,9 +93,9 @@ def handle_disconnect():
 
 
 PROFILE_PRESETS = {
-    "small":  {"name": "Small",  "moisture_threshold": 35, "duration_min": 2, "water_usage": "Low"},
-    "medium": {"name": "Medium", "moisture_threshold": 41, "duration_min": 4, "water_usage": "Medium"},
-    "large":  {"name": "Large",  "moisture_threshold": 55, "duration_min": 6, "water_usage": "High"},
+    "small":  {"name": "Small",  "moisture_threshold": 55, "duration_min": 2, "water_usage": "Low"},
+    "medium": {"name": "Medium", "moisture_threshold": 55, "duration_min": 3, "water_usage": "Medium"},
+    "large":  {"name": "Large",  "moisture_threshold": 55, "duration_min": 4, "water_usage": "High"},
 }
 
 @app.route("/api/plant", methods=["GET"])
