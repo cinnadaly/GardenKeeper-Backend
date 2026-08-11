@@ -213,8 +213,15 @@ def get_soil_moisture_per_hour(horas=12):
         cursor.close()
         return [{"hora": int(r["hora_num"]), "soil_moisture": round(r["promedio"], 1)} for r in rows]
 
+def get_history(hours=12):
+    now = datetime.now()
 
-def get_history(limite=20):
+    # Genera la lista de "cubetas" de hora, de la mas reciente a la mas vieja
+    buckets = []
+    for i in range(hours):
+        bucket_dt = (now - timedelta(hours=i)).replace(minute=0, second=0, microsecond=0)
+        buckets.append(bucket_dt)
+
     with get_conn() as conn:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
@@ -227,34 +234,49 @@ def get_history(limite=20):
                 timestamp
             FROM sensor_readings sr
             WHERE sr.reading_id IN (
-                SELECT MAX(reading_id) FROM sensor_readings GROUP BY DATE_FORMAT(timestamp, '%%Y-%%m-%%d %%H')
+                SELECT MAX(reading_id) FROM sensor_readings
+                WHERE timestamp >= %s
+                GROUP BY DATE_FORMAT(timestamp, '%%Y-%%m-%%d %%H')
             )
-            ORDER BY timestamp DESC
-            LIMIT %s
-        """, (limite,))
-        rows = cursor.fetchall()
+        """, (buckets[-1],))  # solo desde la hora mas vieja que nos interesa
 
-        historial = []
-        for r in rows:
+        rows = cursor.fetchall()
+        readings_by_bucket = {r["bucket"]: r for r in rows}
+
+        history = []
+        for bucket_dt in buckets:
+            bucket_key = bucket_dt.strftime('%Y-%m-%d %H:00')
+            reading = readings_by_bucket.get(bucket_key)
+
             sub_cursor = conn.cursor(dictionary=True)
             sub_cursor.execute("""
                 SELECT COALESCE(SUM(duration), 0) AS total
                 FROM irrigation_log
-                WHERE DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:00') = %s
-            """, (r["bucket"],))
+                WHERE DATE_FORMAT(start_time, '%%Y-%%m-%%d %%H:00') = %s
+            """, (bucket_key,))
             watered_for = sub_cursor.fetchone()["total"]
             sub_cursor.close()
 
-            historial.append({
-                "time": r["hour"] or "N/A",
-                "soil_moisture": r["soil_moisture"],
-                "temperature": r["temperature"],
-                "watered_for_min": round(watered_for, 1),
-                "system": r["pump_status"] or "OFF",
-            })
+            if reading is None:
+                # No hubo ninguna lectura esa hora -> sistema offline
+                history.append({
+                    "time": bucket_dt.strftime('%I:%M %p'),
+                    "soil_moisture": None,
+                    "temperature": None,
+                    "watered_for_min": None,
+                    "system": "N/A",
+                })
+            else:
+                history.append({
+                    "time": reading["hour"] or bucket_dt.strftime('%I:%M %p'),
+                    "soil_moisture": reading["soil_moisture"],
+                    "temperature": reading["temperature"],
+                    "watered_for_min": round(watered_for, 1),
+                    "system": reading["pump_status"] or "OFF",
+                })
 
         cursor.close()
-        return historial
+        return history
 
 
 def get_plant_profile():

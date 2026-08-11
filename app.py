@@ -74,7 +74,7 @@ def overview():
 
 @app.route("/api/history", methods=["GET"])
 def history():
-    return jsonify(_json_safe(db.get_history(limite=20)))
+    return jsonify(_json_safe(db.get_history(hours=12)))
 
 
 @app.route("/api/status", methods=["GET"])
