@@ -8,6 +8,8 @@ import config
 import database as db
 
 
+print("=== mqtt_listener.py LOADED - FIXED VERSION v2 ===")
+
 _last_watering_ts = 0
 _watering_timer = None
 _watering_in_progress = False
@@ -22,36 +24,55 @@ def _safe_notify(on_data_change):
         print(f"[MQTT] Error notifying update: {e}")
 
 
-def _stop_automatic_watering(client):
-    global _watering_in_progress
-    print("[AUTO-WATER] Duration complete, stopping pump")
+def _stop_automatic_watering(client, reason="Duration complete"):
+    global _watering_in_progress, _watering_timer
+    print(f"[AUTO-WATER] {reason}, stopping pump")
     client.publish(config.TOPIC_COMANDOS, "OFF")
     _watering_in_progress = False
 
+    # Cancel any pending timer so a delayed stop can't fire again later
+    if _watering_timer:
+        _watering_timer.cancel()
+        _watering_timer = None
 
 def _evaluate_automatic_watering(data, client):
-    #printMyMessage()
     global _last_watering_ts, _watering_timer, _watering_in_progress
     soil = data.get("soil_moisture")
     profile = db.get_plant_profile()
+    water_level = data.get("water_level")  # telemetria now sends this key directly
+    pump_status = data.get("pump_status")
+
+    # Safety net: if the pump is physically ON and the tank is Empty,
+    # force it off regardless of what our internal state thinks happened
+    # (covers restarts, desync, or a cycle started before this fix was loaded).
+    if water_level == "Empty" and pump_status == "ON":
+        _stop_automatic_watering(client, reason="Pump was ON with Empty tank (safety stop)")
+        return
 
     now = time.time()
     hours_since_last = (now - _last_watering_ts) / 3600
 
-    print("MESSAGE: soil" + str(soil) + " - moisture threshold " + str(profile["moisture_threshold"]) + " - hours since last " + str(hours_since_last) +  " - min-interval-hours: " + str(profile["min_interval_hours"]))
+    print("MESSAGE: soil" + str(soil) + " - moisture threshold " + str(profile["moisture_threshold"]) +
+          " - hours since last " + str(hours_since_last) + " - min-interval-hours: " + str(profile["min_interval_hours"]))
 
-
+    # If already watering, check whether water ran out mid-cycle
     if _watering_in_progress:
-        return  # already watering, skip evaluation
+        if water_level == "Empty":
+            _stop_automatic_watering(client, reason="Water ran out mid-cycle")
+        return  # already watering (or just stopped), skip further evaluation
 
     if profile is None:
         return  # plant not configured yet
 
-   
     if soil is None:
         return
 
+    print("WATER LEVEL CURRENT: " + str(water_level))
 
+    # Don't even consider starting if there's no water
+    if water_level == "Empty":
+        print("[AUTO-WATER] Water level empty, skipping watering.")
+        return
 
     if soil < profile["moisture_threshold"] and hours_since_last >= profile["min_interval_hours"]:
         print(f"[AUTO-WATER] Soil at {soil}%, threshold {profile['moisture_threshold']}%. Starting watering...")

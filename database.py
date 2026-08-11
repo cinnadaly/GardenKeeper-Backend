@@ -79,7 +79,7 @@ def insert_sensor_reading(data: dict):
             data.get("temp"),
             data.get("hum_ambient"),
             data.get("soil_moisture"),
-            data.get("water_deposit"),
+            data.get("water_level"),
             data.get("pump_status"),
             _now(),
         ))
@@ -104,7 +104,7 @@ def upsert_system_status(data: dict):
             data.get("mqtt"),
             data.get("bomba_disponible"),
             data.get("sensores_ok"),
-            data.get("bomba_estado"),
+            data.get("pump_status"),
             _now(),
         ))
         cursor.close()

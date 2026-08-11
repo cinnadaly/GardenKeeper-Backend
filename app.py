@@ -4,6 +4,8 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO
 
+from datetime import datetime  
+
 import config
 import database as db
 from mqtt_listener import iniciar_listener_en_hilo
@@ -15,6 +17,8 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 
 def _json_safe(value):
+    if isinstance(value, datetime):          
+        return value.isoformat()
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, dict):
@@ -46,9 +50,6 @@ def build_dashboard_payload():
 
 
 def notify_dashboard_update():
-    """Se llama cada vez que llega un mensaje MQTT que puede cambiar el
-    dashboard, overview o history: emite el payload actualizado a todos
-    los clientes conectados por Socket.IO."""
     socketio.emit("dashboard_update", build_dashboard_payload())
 
 
