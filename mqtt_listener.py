@@ -8,11 +8,27 @@ import config
 import database as db
 
 
-print("=== mqtt_listener.py LOADED - FIXED VERSION v2 ===")
+print("=== mqtt_listener.py LOADED - FIXED VERSION v3 (duracion en ESP32) ===")
 
 _last_watering_ts = 0
 _watering_timer = None
 _watering_in_progress = False
+_watering_duration_sec = 0
+
+# Margen que le damos al ESP32 antes de considerar que algo salio mal y que
+# nuestro propio Timer tiene que intervenir. El ESP32 ahora se autoapaga con
+# la duracion que le mandamos, asi que este Timer es solo un respaldo.
+_WATCHDOG_MARGIN_SEC = 30
+
+
+def _init_last_watering_ts():
+    global _last_watering_ts
+    ts = db.get_last_watering_ts()
+    if ts is not None:
+        _last_watering_ts = ts
+        print(f"[AUTO-WATER] Restored last watering ts from DB: {ts}")
+    else:
+        _last_watering_ts = 0
 
 
 def _safe_notify(on_data_change):
@@ -30,21 +46,18 @@ def _stop_automatic_watering(client, reason="Duration complete"):
     client.publish(config.TOPIC_COMANDOS, "OFF")
     _watering_in_progress = False
 
-    # Cancel any pending timer so a delayed stop can't fire again later
     if _watering_timer:
         _watering_timer.cancel()
         _watering_timer = None
 
+
 def _evaluate_automatic_watering(data, client):
-    global _last_watering_ts, _watering_timer, _watering_in_progress
+    global _last_watering_ts, _watering_timer, _watering_in_progress, _watering_duration_sec
     soil = data.get("soil_moisture")
     profile = db.get_plant_profile()
-    water_level = data.get("water_level")  # telemetria now sends this key directly
+    water_level = data.get("water_level")
     pump_status = data.get("pump_status")
 
-    # Safety net: if the pump is physically ON and the tank is Empty,
-    # force it off regardless of what our internal state thinks happened
-    # (covers restarts, desync, or a cycle started before this fix was loaded).
     if water_level == "Empty" and pump_status == "ON":
         _stop_automatic_watering(client, reason="Pump was ON with Empty tank (safety stop)")
         return
@@ -52,51 +65,88 @@ def _evaluate_automatic_watering(data, client):
     now = time.time()
     hours_since_last = (now - _last_watering_ts) / 3600
 
-    print("MESSAGE: soil" + str(soil) + " - moisture threshold " + str(profile["moisture_threshold"]) +
-          " - hours since last " + str(hours_since_last) + " - min-interval-hours: " + str(profile["min_interval_hours"]))
+    if profile is None:
+        if _watering_in_progress:
+            pass
+        else:
+            return
 
-    # If already watering, check whether water ran out mid-cycle
     if _watering_in_progress:
         if water_level == "Empty":
             _stop_automatic_watering(client, reason="Water ran out mid-cycle")
-        return  # already watering (or just stopped), skip further evaluation
+            return
 
-    if profile is None:
-        return  # plant not configured yet
-
-    if soil is None:
+        # Watchdog: el ESP32 ya se autoapaga con la duracion que le mandamos,
+        # asi que esto solo deberia disparar si el ESP32 nunca recibio el
+        # comando ON con duracion (mensaje corrupto, etc.) y se quedo
+        # regando sin limite propio mas alla del safety timeout del firmware.
+        elapsed = now - _last_watering_ts
+        if elapsed >= _watering_duration_sec + _WATCHDOG_MARGIN_SEC:
+            _stop_automatic_watering(
+                client,
+                reason=f"Watchdog: {elapsed:.0f}s regados, el ESP32 no confirmo el apagado"
+            )
         return
 
-    print("WATER LEVEL CURRENT: " + str(water_level))
+    if profile is None or soil is None:
+        return
 
-    # Don't even consider starting if there's no water
     if water_level == "Empty":
         print("[AUTO-WATER] Water level empty, skipping watering.")
         return
 
     if soil < profile["moisture_threshold"] and hours_since_last >= profile["min_interval_hours"]:
-        print(f"[AUTO-WATER] Soil at {soil}%, threshold {profile['moisture_threshold']}%. Starting watering...")
+        try:
+            duration_min = float(profile["duration_min"])
+        except (TypeError, ValueError):
+            print(f"[AUTO-WATER] duration_min invalido en el perfil: {profile.get('duration_min')!r}, usando 2 min por defecto")
+            duration_min = 2.0
 
-        client.publish(config.TOPIC_COMANDOS, "ON")
+        duration_sec = duration_min * 60
+
+        print(f"[AUTO-WATER] Soil at {soil}%, threshold {profile['moisture_threshold']}%. "
+              f"Starting watering for {duration_sec:.0f}s (duracion enviada al ESP32)...")
+
+        # La duracion viaja en el comando: el ESP32 es quien se autoapaga
+        # exactamente a tiempo, sin depender de que le llegue un segundo
+        # mensaje OFF por la red.
+        comando = json.dumps({"cmd": "ON", "duration_sec": int(duration_sec)})
+        client.publish(config.TOPIC_COMANDOS, comando)
+
         _watering_in_progress = True
         _last_watering_ts = now
+        _watering_duration_sec = duration_sec
 
-        duration_sec = profile["duration_min"] * 60
-        _watering_timer = threading.Timer(duration_sec, _stop_automatic_watering, args=(client,))
+        # Respaldo: si por lo que sea nunca vemos confirmacion de que se
+        # apago, forzamos un OFF nosotros.
+        _watering_timer = threading.Timer(
+            duration_sec + _WATCHDOG_MARGIN_SEC, _stop_automatic_watering, args=(client,)
+        )
         _watering_timer.daemon = True
         _watering_timer.start()
 
 
+_SYNC_GRACE_SECONDS = 5
+
+
 def _sync_watering_state(data):
-    """If Alexa or anyone else stops the pump before the automatic timer
-    finishes, cancel the timer to avoid an inconsistent state."""
+    """Detecta cuando el ESP32 (o Alexa) apago la bomba, para limpiar nuestro
+    estado interno. Con el ESP32 autoapagandose por duracion programada, esta
+    es ahora la via normal por la que nos enteramos de que el riego termino."""
     global _watering_in_progress, _watering_timer
 
     if data.get("pump_status") == "OFF" and _watering_in_progress:
+        elapsed_since_start = time.time() - _last_watering_ts
+        if elapsed_since_start < _SYNC_GRACE_SECONDS:
+            print(f"[AUTO-WATER] Ignoring OFF in riego/estado, "
+                  f"It's been {elapsed_since_start:.1f}s since started")
+            return
+
         if _watering_timer:
             _watering_timer.cancel()
+            _watering_timer = None
         _watering_in_progress = False
-        print("[AUTO-WATER] Watering interrupted externally, timer cancelled")
+        print("[AUTO-WATER] Watering finished/interrupted, state cleared")
 
 
 def _on_connect(client, userdata, flags, reason_code, properties=None):
@@ -109,7 +159,7 @@ def _on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def _on_message(client, userdata, msg):
-    
+
     on_data_change = userdata
     topic = msg.topic
     payload_raw = msg.payload.decode("utf-8", errors="ignore")
@@ -145,8 +195,6 @@ def _on_message(client, userdata, msg):
     except Exception as e:
         print(f"[MQTT] Error processing message from {topic}: {e}")
 
-def printMyMessage():
-    print("WE ARE ON MESSAGE")
 
 def crear_cliente_mqtt(on_data_change=None):
     client = mqtt.Client(
@@ -159,11 +207,11 @@ def crear_cliente_mqtt(on_data_change=None):
     client.user_data_set(on_data_change)
     client.on_connect = _on_connect
     client.on_message = _on_message
-    #client.on_message = printMyMessage()
     return client
 
 
 def iniciar_listener_en_hilo(on_data_change=None):
+    _init_last_watering_ts()
     client = crear_cliente_mqtt(on_data_change)
     client.connect(config.MQTT_HOST, config.MQTT_PORT, keepalive=60)
     client.loop_start()

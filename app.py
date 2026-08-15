@@ -27,6 +27,17 @@ def _json_safe(value):
         return [_json_safe(v) for v in value]
     return value
 
+def _to_bool(value):
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        return value != 0
+
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "online", "ok")
+
+    return False
 
 def build_dashboard_payload():
     ultima = db.get_last_reading() or {}
@@ -42,8 +53,8 @@ def build_dashboard_payload():
         "system_status": {
             "esp32_online": estado.get("esp32") == "online",
             "mqtt_connected": estado.get("mqtt") == "online",
-            "pump_available": estado.get("pump_available") == "true",
-            "sensors_working": estado.get("sensors_ok") == "true",
+            "pump_available": _to_bool(estado.get("pump_available")),
+            "sensors_working": _to_bool(estado.get("sensors_ok")),
         },
     }
     return _json_safe(payload)

@@ -42,7 +42,9 @@ def init_db():
                 event_id INT AUTO_INCREMENT PRIMARY KEY,
                 start_time DATETIME,
                 end_time DATETIME,
-                duration FLOAT,                    -- minutos
+                duration FLOAT,                     -- minutos, real (reportado por el ESP32)
+                planned_duration_min FLOAT,          -- minutos, lo que el perfil pedia (NULL si fue manual)
+                source VARCHAR(20) DEFAULT 'auto',   -- 'auto' / 'manual' / 'safety_timeout' / etc
                 created_at DATETIME NOT NULL
             )
         """)
@@ -62,8 +64,20 @@ def init_db():
         cursor.close()
 '''
 
+
 def _now():
-    return datetime.now().isoformat(timespec="seconds")
+    # espacio en vez de "T" -- formato que MySQL/MariaDB si acepta
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _to_mysql_dt(ts_str):
+    """El ESP32 manda timestamps en ISO con 'T' (ej. 2026-08-13T18:26:09).
+    MySQL/MariaDB espera espacio en vez de 'T'. Sin esto, la fila se
+    guarda con fecha 0000-00-00 sin dar error."""
+    if not ts_str or ts_str == "N/A":
+        return None
+    return ts_str.replace("T", " ", 1)
+
 
 def insert_sensor_reading(data: dict):
     print("my timestamp: " + str(data.get("timestamp")))
@@ -74,7 +88,7 @@ def insert_sensor_reading(data: dict):
                 (timestamp, hour, temperature, hum_ambient, soil_moisture, water_level, pump_status, received_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            data.get("timestamp"),
+            _to_mysql_dt(data.get("timestamp")),
             data.get("hour"),
             data.get("temp"),
             data.get("hum_ambient"),
@@ -123,11 +137,10 @@ def set_esp32_status(valor: str):
         """, (valor, _now()))
         cursor.close()
 
-        from datetime import datetime, timedelta
 
-#create datetime for logs
+# create datetime for logs
 def _parse_time_to_datetime(time_str, reference_date=None):
-    
+
     if not time_str or time_str == "N/A":
         return None
 
@@ -139,8 +152,6 @@ def _parse_time_to_datetime(time_str, reference_date=None):
         return None
 
 
-
-
 def insert_irrigation_log(data: dict):
     with get_conn() as conn:
         cursor = conn.cursor()
@@ -148,18 +159,26 @@ def insert_irrigation_log(data: dict):
         start_dt = _parse_time_to_datetime(data.get("started"))
         end_dt = _parse_time_to_datetime(data.get("ended"))
 
-        # Si el riego cruzo la medianoche (ej. empezo 11:58 PM y termino 12:01 AM),
-        # el "ended" cae en el dia siguiente aunque ambos usen la fecha de hoy.
         if start_dt and end_dt and end_dt < start_dt:
             end_dt += timedelta(days=1)
 
+        # El ESP32 manda "source" ('auto' / 'manual' / 'duracion_programada_completa'
+        # / 'safety_timeout') y, cuando aplica, "duracion_programada_min" con lo
+        # que el perfil pedia -- asi queda visible lo planeado vs lo real.
+        source = data.get("source") or "auto"
+        planned = data.get("duracion_programada_min")
+        if planned in (None, 0, 0.0):
+            planned = None
+
         cursor.execute("""
-            INSERT INTO irrigation_log (start_time, end_time, duration, created_at)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO irrigation_log (start_time, end_time, duration, planned_duration_min, source, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """, (
             start_dt,
             end_dt,
             data.get("duracion_min"),
+            planned,
+            source,
             _now(),
         ))
         cursor.close()
@@ -215,69 +234,172 @@ def get_soil_moisture_per_hour(horas=12):
 
 def get_history(hours=12):
     now = datetime.now()
-
-    # Genera la lista de "cubetas" de hora, de la mas reciente a la mas vieja
     buckets = []
+
     for i in range(hours):
-        bucket_dt = (now - timedelta(hours=i)).replace(minute=0, second=0, microsecond=0)
+        bucket_dt = (
+            now - timedelta(hours=i)
+        ).replace(
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
         buckets.append(bucket_dt)
+
+    oldest = buckets[-1]
 
     with get_conn() as conn:
         cursor = conn.cursor(dictionary=True)
+
         cursor.execute("""
             SELECT
-                DATE_FORMAT(timestamp, '%%Y-%%m-%%d %%H:00') AS bucket,
-                hour,
-                soil_moisture,
-                temperature,
-                pump_status,
-                timestamp
-            FROM sensor_readings sr
-            WHERE sr.reading_id IN (
-                SELECT MAX(reading_id) FROM sensor_readings
-                WHERE timestamp >= %s
-                GROUP BY DATE_FORMAT(timestamp, '%%Y-%%m-%%d %%H')
-            )
-        """, (buckets[-1],))  # solo desde la hora mas vieja que nos interesa
+                DATE_FORMAT(timestamp, '%Y-%m-%d %H:00') AS bucket,
+                AVG(soil_moisture) AS avg_soil_moisture,
+                AVG(temperature) AS avg_temperature,
+                COUNT(*) AS reading_count
+            FROM sensor_readings
+            WHERE timestamp >= %s
+            GROUP BY bucket
+            ORDER BY bucket ASC
+        """, (oldest,))
 
-        rows = cursor.fetchall()
-        readings_by_bucket = {r["bucket"]: r for r in rows}
+        readings = cursor.fetchall()
 
-        history = []
-        for bucket_dt in buckets:
-            bucket_key = bucket_dt.strftime('%Y-%m-%d %H:00')
-            reading = readings_by_bucket.get(bucket_key)
+        cursor.execute("""
+            SELECT
+                start_time,
+                end_time,
+                duration,
+                planned_duration_min,
+                source
+            FROM irrigation_log
+            WHERE start_time >= %s
+            ORDER BY start_time ASC
+        """, (oldest,))
 
-            sub_cursor = conn.cursor(dictionary=True)
-            sub_cursor.execute("""
-                SELECT COALESCE(SUM(duration), 0) AS total
-                FROM irrigation_log
-                WHERE DATE_FORMAT(start_time, '%%Y-%%m-%%d %%H:00') = %s
-            """, (bucket_key,))
-            watered_for = sub_cursor.fetchone()["total"]
-            sub_cursor.close()
-
-            if reading is None:
-                # No hubo ninguna lectura esa hora -> sistema offline
-                history.append({
-                    "time": bucket_dt.strftime('%I:%M %p'),
-                    "soil_moisture": None,
-                    "temperature": None,
-                    "watered_for_min": None,
-                    "system": "N/A",
-                })
-            else:
-                history.append({
-                    "time": reading["hour"] or bucket_dt.strftime('%I:%M %p'),
-                    "soil_moisture": reading["soil_moisture"],
-                    "temperature": reading["temperature"],
-                    "watered_for_min": round(watered_for, 1),
-                    "system": reading["pump_status"] or "OFF",
-                })
+        events = cursor.fetchall()
 
         cursor.close()
-        return history
 
+    readings_by_bucket = {
+        r["bucket"]: r
+        for r in readings
+    }
+
+    events_by_bucket = {}
+
+    for e in events:
+        if not e["start_time"]:
+            continue
+
+        key = e["start_time"].strftime("%Y-%m-%d %H:00")
+
+        events_by_bucket.setdefault(key, []).append(e)
+
+    history = []
+
+    for bucket_dt in buckets:
+
+        bucket_key = bucket_dt.strftime("%Y-%m-%d %H:00")
+
+        reading = readings_by_bucket.get(bucket_key)
+        hour_events = events_by_bucket.get(bucket_key, [])
+
+        start_label = bucket_dt.strftime("%I %p").lstrip("0")
+
+        end_dt = bucket_dt + timedelta(hours=1)
+        end_label = end_dt.strftime("%I %p").lstrip("0")
+
+        if bucket_dt == buckets[0]:
+            time_label = f"{start_label} – Now"
+        else:
+            time_label = f"{start_label} – {end_label}"
+
+        watered_total = round(
+            sum(float(e["duration"] or 0) for e in hour_events),
+            1
+        )
+
+        if watered_total > 0:
+            system_state = "WATERING"
+
+        elif reading:
+            system_state = "ONLINE"
+
+        else:
+            system_state = "OFFLINE"
+
+        if reading:
+
+            soil_moisture = (
+                round(float(reading["avg_soil_moisture"]))
+                if reading["avg_soil_moisture"] is not None
+                else None
+            )
+
+            temperature = (
+                round(float(reading["avg_temperature"]))
+                if reading["avg_temperature"] is not None
+                else None
+            )
+
+        else:
+            soil_moisture = None
+            temperature = None
+
+        event_list = [
+            {
+                "start": (
+                    e["start_time"].strftime("%I:%M %p")
+                    if e["start_time"]
+                    else None
+                ),
+
+                "end": (
+                    e["end_time"].strftime("%I:%M %p")
+                    if e["end_time"]
+                    else None
+                ),
+
+                "duration": e["duration"],
+
+                "planned_duration": e["planned_duration_min"],
+
+                "matches_profile": (
+                    e["planned_duration_min"] is not None
+                    and e["duration"] is not None
+                    and abs(
+                        float(e["duration"])
+                        - float(e["planned_duration_min"])
+                    ) <= 0.5
+                ),
+
+                "source": e["source"] or "auto",
+            }
+
+            for e in hour_events
+        ]
+
+        history.append({
+            "time": time_label,
+
+            "soil_moisture": soil_moisture,
+
+            "temperature": temperature,
+
+            "watered_for_min": (
+                watered_total
+                if watered_total > 0
+                else None
+            ),
+
+            "events": event_list,
+
+            "system": system_state,
+        })
+
+    return history
 
 def get_plant_profile():
     with get_conn() as conn:
@@ -285,7 +407,8 @@ def get_plant_profile():
         cursor.execute("SELECT * FROM plant_profile WHERE id = 1")
         row = cursor.fetchone()
         cursor.close()
-        return row  
+        return row
+
 
 def create_plant_profile(data: dict):
     with get_conn() as conn:
@@ -300,3 +423,17 @@ def create_plant_profile(data: dict):
             data.get("min_interval_hours", 2), datetime.now()
         ))
         cursor.close()
+
+
+def get_last_watering_ts():
+    """Epoch timestamp (float) del último riego iniciado, o None si no hay registro."""
+    with get_conn() as conn:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT start_time FROM irrigation_log
+            WHERE start_time IS NOT NULL
+            ORDER BY event_id DESC LIMIT 1
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        return row["start_time"].timestamp() if row and row["start_time"] else None
